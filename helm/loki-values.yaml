@@ -1,0 +1,53 @@
+# Loki in single-binary mode with filesystem storage (right-sized for a lab cluster).
+# helm upgrade --install loki grafana/loki -n observability -f helm/loki-values.yaml
+deploymentMode: SingleBinary
+
+loki:
+  # Single-tenant lab install. In production enable auth_enabled + a gateway with auth.
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  limits_config:
+    retention_period: 72h           # 3 days (laptop profile)
+    allow_structured_metadata: true
+    volume_enabled: true
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 2Gi
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+# Simple-scalable components off (required for SingleBinary mode)
+backend: { replicas: 0 }
+read: { replicas: 0 }
+write: { replicas: 0 }
+
+gateway: { enabled: false }
+chunksCache: { enabled: false }
+resultsCache: { enabled: false }
+lokiCanary: { enabled: false }
+test: { enabled: false }
+minio: { enabled: false }
+
+# Let Prometheus scrape Loki's own metrics
+monitoring:
+  serviceMonitor:
+    enabled: true

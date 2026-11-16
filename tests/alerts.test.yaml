@@ -1,0 +1,176 @@
+# Unit tests for the alert rules: feed synthetic time series, assert which alerts fire.
+# Run: ./scripts/test-alerts.sh   (extracts .spec from the PrometheusRule, then promtool test rules)
+rule_files:
+  - rules.generated.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # 1) HighErrorRate: payments returns ~14% 5xx -> critical after 5m; frontend healthy -> no alert
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{namespace="shop", service="payments", status="200"}'
+        values: '0+60x15'
+      - series: 'http_requests_total{namespace="shop", service="payments", status="500"}'
+        values: '0+10x15'
+      - series: 'http_requests_total{namespace="shop", service="frontend", status="201"}'
+        values: '0+60x15'
+    alert_rule_test:
+      - eval_time: 3m          # condition true but `for: 5m` not yet satisfied
+        alertname: HighErrorRate
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: shop, service: payments }
+            exp_annotations:
+              summary: "High error rate on payments"
+              description: "payments is returning 14.29% 5xx responses (threshold 5%) for more than 5 minutes."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/high-error-rate.md
+    promql_expr_test:
+      - expr: slo:sli_error:ratio_rate5m{service="payments"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'slo:sli_error:ratio_rate5m{service="payments"}'
+            value: 0.14285714285714288
+
+  # 2) HighLatencyP99: most requests take 1.5-2.5s
+  - interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{namespace="shop", service="frontend", le="1"}'
+        values: '0+10x15'
+      - series: 'http_request_duration_seconds_bucket{namespace="shop", service="frontend", le="1.5"}'
+        values: '0+10x15'
+      - series: 'http_request_duration_seconds_bucket{namespace="shop", service="frontend", le="2.5"}'
+        values: '0+100x15'
+      - series: 'http_request_duration_seconds_bucket{namespace="shop", service="frontend", le="+Inf"}'
+        values: '0+100x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighLatencyP99
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: shop, service: frontend }
+            exp_annotations:
+              summary: "High p99 latency on frontend"
+              description: "p99 latency of frontend is 2.489s (threshold 1s) for more than 5 minutes."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/high-latency.md
+
+  # 3) PodCrashLooping: 5 restarts within the hour
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="shop", pod="orders-7d9f", container="orders"}'
+        values: '0 1 2 3 4 5 5 5 5 5'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PodCrashLooping
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: shop, pod: orders-7d9f, container: orders }
+            exp_annotations:
+              summary: "Pod shop/orders-7d9f is crash looping"
+              description: "Container orders restarted 5 times in the last hour (threshold 3)."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/pod-crashlooping.md
+
+  # 4) NodeNotReady: Ready goes 1 -> 0
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_status_condition{node="kind-worker", condition="Ready", status="true"}'
+        values: '1 1 0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NodeNotReady
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: NodeNotReady
+        exp_alerts:
+          - exp_labels: { severity: critical, node: kind-worker, condition: Ready, status: "true" }
+            exp_annotations:
+              summary: "Node kind-worker is not ready"
+              description: "Node kind-worker has reported NotReady/Unknown for more than 5 minutes; its pods may be unavailable."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/node-not-ready.md
+
+  # 5) Disk: /data has 8% free (warning only), /var has 3% free (warning + critical)
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{instance="node1", mountpoint="/data", fstype="ext4"}'
+        values: '8x10'
+      - series: 'node_filesystem_size_bytes{instance="node1", mountpoint="/data", fstype="ext4"}'
+        values: '100x10'
+      - series: 'node_filesystem_readonly{instance="node1", mountpoint="/data", fstype="ext4"}'
+        values: '0x10'
+      - series: 'node_filesystem_avail_bytes{instance="node1", mountpoint="/var", fstype="ext4"}'
+        values: '3x10'
+      - series: 'node_filesystem_size_bytes{instance="node1", mountpoint="/var", fstype="ext4"}'
+        values: '100x10'
+      - series: 'node_filesystem_readonly{instance="node1", mountpoint="/var", fstype="ext4"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: DiskSpaceCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, instance: node1, mountpoint: /var, fstype: ext4 }
+            exp_annotations:
+              summary: "Disk almost full on node1 /var"
+              description: "Only 3% free on /var (threshold 5%). Writes will start failing."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/disk-space-low.md
+      - eval_time: 8m
+        alertname: DiskSpaceLow
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: node1, mountpoint: /data, fstype: ext4 }
+            exp_annotations:
+              summary: "Low disk space on node1 /data"
+              description: "Only 8% free on /data (threshold 10%)."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/disk-space-low.md
+          - exp_labels: { severity: warning, instance: node1, mountpoint: /var, fstype: ext4 }
+            exp_annotations:
+              summary: "Low disk space on node1 /var"
+              description: "Only 3% free on /var (threshold 10%)."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/disk-space-low.md
+
+  # 6) ServiceDown: scrape target disappears
+  - interval: 1m
+    input_series:
+      - series: 'up{namespace="shop", service="orders", pod="orders-7d9f", job="orders"}'
+        values: '1 1 0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: shop, service: orders, pod: orders-7d9f, job: orders }
+            exp_annotations:
+              summary: "orders target orders-7d9f is down"
+              description: "Prometheus cannot scrape orders-7d9f (orders) for more than 2 minutes."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/service-down.md
+
+  # 7) SLO fast burn: 50% errors for over an hour
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{namespace="shop", service="frontend", status="201"}'
+        values: '0+60x80'
+      - series: 'http_requests_total{namespace="shop", service="frontend", status="502"}'
+        values: '0+60x80'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: SLOErrorBudgetBurnFast
+        exp_alerts:
+          - exp_labels: { severity: critical, service: frontend }
+            exp_annotations:
+              summary: "frontend is burning its error budget 14x too fast"
+              description: "At the current error rate the 30-day error budget of frontend will be exhausted in about 2 days."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/slo-burn-rate.md
+
+  # 8) Business (info): 10% declines
+  - interval: 1m
+    input_series:
+      - series: 'shop_orders_total{namespace="shop", service="orders", result="declined"}'
+        values: '0+10x40'
+      - series: 'shop_orders_total{namespace="shop", service="orders", result="success"}'
+        values: '0+90x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: PaymentDeclinesElevated
+        exp_alerts:
+          - exp_labels: { severity: info }
+            exp_annotations:
+              summary: "Card declines above 5% of orders"
+              description: "10% of orders were declined over the last 15 minutes (normal is about 1%). Business signal, not an outage."
+              runbook_url: https://github.com/Jason2303/observability-platform/blob/main/runbooks/payment-declines.md

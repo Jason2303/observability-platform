@@ -1,0 +1,72 @@
+# Grafana Alloy collects pod logs through the Kubernetes API and ships them to Loki.
+# (Alloy replaces Promtail, which reached end-of-life.)
+# helm upgrade --install alloy grafana/alloy -n observability -f helm/alloy-values.yaml
+controller:
+  type: deployment      # loki.source.kubernetes tails via the API, so one replica covers the cluster
+  replicas: 1
+
+alloy:
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 300m, memory: 256Mi }
+  configMap:
+    content: |-
+      // Only the application namespace: on a laptop, tailing every pod's logs through the
+      // API server costs more CPU than the rest of the platform.
+      discovery.kubernetes "pods" {
+        role = "pod"
+        namespaces {
+          names = ["shop"]
+        }
+      }
+
+      // Turn Kubernetes metadata into Loki labels (low cardinality only)
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.process.pods.receiver]
+      }
+
+      // Parse the shop's JSON logs: level + service become labels,
+      // trace_id becomes structured metadata (high cardinality, not a label).
+      loki.process "pods" {
+        stage.json {
+          expressions = { level = "level", service = "service", trace_id = "trace_id" }
+        }
+        stage.labels {
+          values = { level = "", service = "" }
+        }
+        stage.structured_metadata {
+          values = { trace_id = "" }
+        }
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.observability.svc:3100/loki/api/v1/push"
+        }
+      }
+
+serviceMonitor:
+  enabled: true

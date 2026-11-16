@@ -1,0 +1,183 @@
+{
+  "groups": [
+    {
+      "name": "shop-recording",
+      "interval": "30s",
+      "rules": [
+        {
+          "record": "service:http_requests:rate5m",
+          "expr": "sum by (namespace, service) (rate(http_requests_total{namespace=\"shop\"}[5m]))"
+        },
+        {
+          "record": "service:http_errors:rate5m",
+          "expr": "sum by (namespace, service) (rate(http_requests_total{namespace=\"shop\", status=~\"5..\"}[5m]))"
+        },
+        {
+          "record": "service:http_latency_seconds:p99_5m",
+          "expr": "histogram_quantile(0.99, sum by (namespace, service, le) (rate(http_request_duration_seconds_bucket{namespace=\"shop\"}[5m])))"
+        },
+        {
+          "record": "slo:sli_error:ratio_rate5m",
+          "expr": "sum by (service) (rate(http_requests_total{namespace=\"shop\", status=~\"5..\"}[5m])) / sum by (service) (rate(http_requests_total{namespace=\"shop\"}[5m]))"
+        },
+        {
+          "record": "slo:sli_error:ratio_rate30m",
+          "expr": "sum by (service) (rate(http_requests_total{namespace=\"shop\", status=~\"5..\"}[30m])) / sum by (service) (rate(http_requests_total{namespace=\"shop\"}[30m]))"
+        },
+        {
+          "record": "slo:sli_error:ratio_rate1h",
+          "expr": "sum by (service) (rate(http_requests_total{namespace=\"shop\", status=~\"5..\"}[1h])) / sum by (service) (rate(http_requests_total{namespace=\"shop\"}[1h]))"
+        },
+        {
+          "record": "slo:sli_error:ratio_rate6h",
+          "expr": "sum by (service) (rate(http_requests_total{namespace=\"shop\", status=~\"5..\"}[6h])) / sum by (service) (rate(http_requests_total{namespace=\"shop\"}[6h]))"
+        }
+      ]
+    },
+    {
+      "name": "shop-service-alerts",
+      "rules": [
+        {
+          "alert": "HighErrorRate",
+          "expr": "(\n  sum by (namespace, service) (rate(http_requests_total{namespace=\"shop\", status=~\"5..\"}[5m]))\n/\n  sum by (namespace, service) (rate(http_requests_total{namespace=\"shop\"}[5m]))\n) > 0.05\n",
+          "for": "5m",
+          "labels": {
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "High error rate on {{ $labels.service }}",
+            "description": "{{ $labels.service }} is returning {{ $value | humanizePercentage }} 5xx responses (threshold 5%) for more than 5 minutes.",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/high-error-rate.md"
+          }
+        },
+        {
+          "alert": "HighLatencyP99",
+          "expr": "histogram_quantile(0.99,\n  sum by (namespace, service, le) (rate(http_request_duration_seconds_bucket{namespace=\"shop\"}[5m]))\n) > 1\n",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "High p99 latency on {{ $labels.service }}",
+            "description": "p99 latency of {{ $labels.service }} is {{ $value | humanizeDuration }} (threshold 1s) for more than 5 minutes.",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/high-latency.md"
+          }
+        },
+        {
+          "alert": "ServiceDown",
+          "expr": "up{namespace=\"shop\"} == 0",
+          "for": "2m",
+          "labels": {
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "{{ $labels.service }} target {{ $labels.pod }} is down",
+            "description": "Prometheus cannot scrape {{ $labels.pod }} ({{ $labels.service }}) for more than 2 minutes.",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/service-down.md"
+          }
+        },
+        {
+          "alert": "PaymentDeclinesElevated",
+          "expr": "sum(rate(shop_orders_total{result=\"declined\"}[15m]))\n/ sum(rate(shop_orders_total[15m])) > 0.05\n",
+          "for": "15m",
+          "labels": {
+            "severity": "info"
+          },
+          "annotations": {
+            "summary": "Card declines above 5% of orders",
+            "description": "{{ $value | humanizePercentage }} of orders were declined over the last 15 minutes (normal is about 1%). Business signal, not an outage.",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/payment-declines.md"
+          }
+        }
+      ]
+    },
+    {
+      "name": "shop-slo-alerts",
+      "rules": [
+        {
+          "alert": "SLOErrorBudgetBurnFast",
+          "expr": "slo:sli_error:ratio_rate1h > (14.4 * 0.005)\nand\nslo:sli_error:ratio_rate5m > (14.4 * 0.005)\n",
+          "for": "2m",
+          "labels": {
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "{{ $labels.service }} is burning its error budget 14x too fast",
+            "description": "At the current error rate the 30-day error budget of {{ $labels.service }} will be exhausted in about 2 days.",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/slo-burn-rate.md"
+          }
+        },
+        {
+          "alert": "SLOErrorBudgetBurnSlow",
+          "expr": "slo:sli_error:ratio_rate6h > (6 * 0.005)\nand\nslo:sli_error:ratio_rate30m > (6 * 0.005)\n",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "{{ $labels.service }} is steadily burning its error budget",
+            "description": "Sustained error rate is 6x the SLO allowance; the 30-day budget will be exhausted in about 5 days.",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/slo-burn-rate.md"
+          }
+        }
+      ]
+    },
+    {
+      "name": "platform-alerts",
+      "rules": [
+        {
+          "alert": "PodCrashLooping",
+          "expr": "increase(kube_pod_container_status_restarts_total[1h]) > 3",
+          "for": "1m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping",
+            "description": "Container {{ $labels.container }} restarted {{ $value | printf \"%.0f\" }} times in the last hour (threshold 3).",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/pod-crashlooping.md"
+          }
+        },
+        {
+          "alert": "NodeNotReady",
+          "expr": "kube_node_status_condition{condition=\"Ready\", status=\"true\"} == 0",
+          "for": "5m",
+          "labels": {
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "Node {{ $labels.node }} is not ready",
+            "description": "Node {{ $labels.node }} has reported NotReady/Unknown for more than 5 minutes; its pods may be unavailable.",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/node-not-ready.md"
+          }
+        },
+        {
+          "alert": "DiskSpaceLow",
+          "expr": "(\n  node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs\"}\n/ node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs\"}\n) < 0.10\nand node_filesystem_readonly == 0\n",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Low disk space on {{ $labels.instance }} {{ $labels.mountpoint }}",
+            "description": "Only {{ $value | humanizePercentage }} free on {{ $labels.mountpoint }} (threshold 10%).",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/disk-space-low.md"
+          }
+        },
+        {
+          "alert": "DiskSpaceCritical",
+          "expr": "(\n  node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs\"}\n/ node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|ramfs|nsfs\"}\n) < 0.05\nand node_filesystem_readonly == 0\n",
+          "for": "5m",
+          "labels": {
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "Disk almost full on {{ $labels.instance }} {{ $labels.mountpoint }}",
+            "description": "Only {{ $value | humanizePercentage }} free on {{ $labels.mountpoint }} (threshold 5%). Writes will start failing.",
+            "runbook_url": "https://github.com/Jason2303/observability-platform/blob/main/runbooks/disk-space-low.md"
+          }
+        }
+      ]
+    }
+  ]
+}

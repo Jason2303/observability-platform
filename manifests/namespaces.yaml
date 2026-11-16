@@ -1,0 +1,22 @@
+# Namespace isolation: metrics stack, logs/traces stack, and the workload are separated.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring          # Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics
+  labels:
+    purpose: observability
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability       # Loki, Tempo, Grafana Alloy (log collector)
+  labels:
+    purpose: observability
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop                # the microservices application
+  labels:
+    purpose: workload
+    pod-security.kubernetes.io/enforce: restricted

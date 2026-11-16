@@ -1,0 +1,221 @@
+# kube-prometheus-stack: Prometheus + Alertmanager + Grafana + node-exporter + kube-state-metrics
+# helm upgrade --install kps prometheus-community/kube-prometheus-stack -n monitoring -f helm/kube-prometheus-stack-values.yaml
+fullnameOverride: kps
+
+# ---------------------------------------------------------------- kind-specific
+# These control-plane components bind to localhost on kind and can't be scraped;
+# disabling avoids permanently-firing false alerts.
+kubeEtcd: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeProxy: { enabled: false }
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+
+# ---------------------------------------------------------------- Prometheus
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    retentionSize: 1500MB
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    # Pick up ServiceMonitors / PrometheusRules from every namespace, not only this release's
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 384Mi }
+      limits: { cpu: "1", memory: 768Mi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 2Gi } }
+    # RBAC: the chart gives Prometheus a dedicated ServiceAccount with a read-only
+    # ClusterRole (get/list/watch on endpoints, pods, services, nodes/metrics only).
+  service:
+    type: ClusterIP          # never exposed publicly; access via port-forward / SSO proxy
+
+# ---------------------------------------------------------------- Alertmanager
+alertmanager:
+  alertmanagerSpec:
+    # Slack webhook URL comes from a Secret (created by scripts/setup.sh), never from Git
+    secrets: [alertmanager-slack]
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { cpu: 200m, memory: 256Mi }
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: slack-warning
+      group_by: [alertname, namespace, service]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        # Dead man's switch: always firing; route to nothing (or to a heartbeat service)
+        - receiver: "null"
+          matchers: [alertname = "Watchdog"]
+        - receiver: "null"
+          matchers: [alertname = "InfoInhibitor"]
+        # CRITICAL -> #alerts-critical (and on-call pager, see receiver)
+        - receiver: slack-critical
+          matchers: [severity = "critical"]
+          group_wait: 10s
+          repeat_interval: 1h
+        # WARNING -> #alerts-warning, business hours follow-up
+        - receiver: slack-warning
+          matchers: [severity = "warning"]
+        # INFO -> #alerts-info, low noise
+        - receiver: slack-info
+          matchers: [severity = "info"]
+          repeat_interval: 24h
+    inhibit_rules:
+      # A critical alert silences the matching warning for the same service
+      - source_matchers: [severity = "critical"]
+        target_matchers: [severity = "warning"]
+        equal: [alertname, namespace, service]
+      # While the fast SLO burn is paging, the slow-burn warning adds nothing
+      - source_matchers: [alertname = "SLOErrorBudgetBurnFast"]
+        target_matchers: [alertname = "SLOErrorBudgetBurnSlow"]
+        equal: [service]
+    receivers:
+      - name: "null"
+      - name: slack-critical
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#alerts-critical"
+            send_resolved: true
+            title: '{{ if eq .Status "firing" }}:red_circle:{{ else }}:white_check_mark:{{ end }} [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+            text: >-
+              {{ range .Alerts }}*{{ .Annotations.summary }}*
+              {{ .Annotations.description }}
+              *Runbook:* {{ .Annotations.runbook_url }}
+              {{ end }}
+        # On-call paging (bonus): uncomment and create the secret key to page PagerDuty
+        # pagerduty_configs:
+        #   - routing_key_file: /etc/alertmanager/secrets/alertmanager-slack/pagerduty-routing-key
+        #     severity: critical
+      - name: slack-warning
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#alerts-warning"
+            send_resolved: true
+            title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+            text: >-
+              {{ range .Alerts }}{{ .Annotations.summary }} - {{ .Annotations.runbook_url }}
+              {{ end }}
+      - name: slack-info
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#alerts-info"
+            send_resolved: false
+            title: '[INFO] {{ .CommonLabels.alertname }}'
+            text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+
+# ---------------------------------------------------------------- Grafana
+grafana:
+  # No default password: admin credentials come from a Secret generated at install time
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  grafana.ini:
+    auth.anonymous:
+      enabled: false
+    users:
+      allow_sign_up: false
+      default_theme: dark
+    security:
+      disable_gravatar: true
+      cookie_samesite: strict
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+  # Grafana 11.6 instead of the chart's default 13.x: far lighter on start-up, which matters
+  # on a 7 GB laptop. Everything used here (provisioned dashboards, Loki derived fields,
+  # tracesToLogsV2, secret-based admin) works the same.
+  image:
+    tag: "11.6.0"
+  # Stateless: dashboards, data sources and the admin password all come from Git/Secrets,
+  # so nothing is lost when the pod restarts.
+  persistence:
+    enabled: false
+  resources:
+    requests: { cpu: 50m, memory: 192Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  readinessProbe:
+    timeoutSeconds: 5
+  livenessProbe:
+    initialDelaySeconds: 120
+    timeoutSeconds: 30
+    failureThreshold: 10
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+  # Prometheus (uid: prometheus) is added by the chart. Loki + Tempo with correlation:
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      access: proxy
+      url: http://loki.observability.svc:3100
+      jsonData:
+        maxLines: 1000
+        # Log -> trace: turn trace_id in JSON log lines into a link to Tempo
+        derivedFields:
+          - name: TraceID
+            datasourceUid: tempo
+            matcherRegex: '"trace_id":\s*"([0-9a-f]{32})"'
+            url: "$${__value.raw}"
+            urlDisplayLabel: View trace
+    - name: Tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      url: http://tempo.observability.svc:3200
+      jsonData:
+        # Trace -> logs: from a span, jump to the matching log lines in Loki
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: "-5m"
+          spanEndTimeShift: "5m"
+          filterByTraceID: true
+          customQuery: true
+          query: '{namespace="shop"} |= "$${__trace.traceId}"'
+        # Trace -> metrics: RED metrics for the span's service
+        tracesToMetrics:
+          datasourceUid: prometheus
+          tags:
+            - { key: service.name, value: service }
+          queries:
+            - name: Request rate
+              query: 'sum(rate(http_requests_total{$$__tags}[5m]))'
+            - name: Error rate
+              query: 'sum(rate(http_requests_total{$$__tags,status=~"5.."}[5m]))'
+        nodeGraph:
+          enabled: true
+        search:
+          hide: false
+
+# ---------------------------------------------------------------- exporters
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 64Mi }
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }

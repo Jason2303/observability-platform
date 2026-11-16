@@ -1,0 +1,21 @@
+# Packs the exported dashboard JSON into ConfigMaps; the Grafana sidecar
+# auto-loads any ConfigMap labelled grafana_dashboard=1 into the "Shop" folder.
+#   kubectl apply -k dashboards/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: Shop
+configMapGenerator:
+  - name: dashboard-shop-service-overview
+    files: [service-overview.json]
+  - name: dashboard-shop-infrastructure
+    files: [infrastructure.json]
+  - name: dashboard-shop-application-logs
+    files: [application-logs.json]
+  - name: dashboard-shop-slo
+    files: [slo.json]

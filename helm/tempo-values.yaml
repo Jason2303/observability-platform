@@ -1,0 +1,23 @@
+# Tempo (monolithic) receiving OTLP traces from the shop services.
+# Chart moved to the community repo:
+#   helm repo add grafana-community https://grafana-community.github.io/helm-charts
+# helm upgrade --install tempo grafana-community/tempo -n observability -f helm/tempo-values.yaml
+tempo:
+  retention: 24h
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 384Mi }
+
+persistence:
+  enabled: true
+  size: 2Gi
+
+serviceMonitor:
+  enabled: true

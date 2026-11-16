@@ -1,0 +1,7 @@
+# Laptop profile: a single node (control-plane runs workloads too).
+# Fits inside a 5 GB WSL/Docker Desktop memory cap.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: obs
+nodes:
+  - role: control-plane
