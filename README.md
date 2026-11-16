@@ -177,8 +177,3 @@ The Application logs dashboard in Grafana, with logs from the shop services comi
 
 ![Application logs dashboard](docs/screenshots/logs.png)
 
-## Screenshot
-
-The Application logs dashboard in Grafana, with logs from the shop services coming through Loki:
-
-![Application logs dashboard](docs/screenshots/logs.png)
