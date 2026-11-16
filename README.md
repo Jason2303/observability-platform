@@ -176,3 +176,9 @@ Other ways I kept the load down: one replica per service, Prometheus scraping ev
 The Application logs dashboard in Grafana, with logs from the shop services coming through Loki:
 
 ![Application logs dashboard](docs/screenshots/logs.png)
+
+## Screenshot
+
+The Application logs dashboard in Grafana, with logs from the shop services coming through Loki:
+
+![Application logs dashboard](docs/screenshots/logs.png)
